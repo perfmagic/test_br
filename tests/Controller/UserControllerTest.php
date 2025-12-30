@@ -3,8 +3,10 @@
 namespace App\Tests\Controller;
 
 use App\Entity\User;
+use App\Factory\UserFactory;
 use Doctrine\ORM\EntityManagerInterface;
 use Lexik\Bundle\JWTAuthenticationBundle\Services\JWTTokenManagerInterface;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 use Symfony\Component\PasswordHasher\Hasher\UserPasswordHasherInterface;
@@ -13,10 +15,10 @@ class UserControllerTest extends WebTestCase
 {
     private KernelBrowser $client;
     private ?EntityManagerInterface $entityManager;
-    private $rootUser;
-    private $normalUser;
-    private $rootToken;
-    private $normalUserToken;
+    private User $rootUser;
+    private User $normalUser;
+    private string $rootToken;
+    private string $normalUserToken;
 
     protected function setUp(): void
     {
@@ -27,10 +29,8 @@ class UserControllerTest extends WebTestCase
         $passwordHasher = $container->get(UserPasswordHasherInterface::class);
         $jwtManager = $container->get(JWTTokenManagerInterface::class);
 
-        // Start transaction
         $this->entityManager->beginTransaction();
 
-        // Create root user
         $this->rootUser = new User();
         $this->rootUser->setLogin('root');
         $this->rootUser->setPhone('12345678');
@@ -38,7 +38,6 @@ class UserControllerTest extends WebTestCase
         $this->rootUser->setPassword($passwordHasher->hashPassword($this->rootUser, 'password'));
         $this->entityManager->persist($this->rootUser);
 
-        // Create normal user
         $this->normalUser = new User();
         $this->normalUser->setLogin('user');
         $this->normalUser->setPhone('87654321');
@@ -48,73 +47,105 @@ class UserControllerTest extends WebTestCase
 
         $this->entityManager->flush();
 
-        // Generate tokens
         $this->rootToken = $jwtManager->create($this->rootUser);
         $this->normalUserToken = $jwtManager->create($this->normalUser);
     }
 
-    public function testCreateUser()
+    public function testPostAsNormalUserCreatesUserSuccessfully(): void
     {
-        // Test successful creation
         $this->client->request(
             'POST',
             '/v1/api/users',
             [],
             [],
-            ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->rootToken],
+            ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->normalUserToken],
             json_encode(['login' => 'newuser', 'phone' => '11112222', 'password' => 'newpass'])
         );
 
-        $this->assertResponseIsSuccessful();
         $this->assertResponseStatusCodeSame(201);
         $response = json_decode($this->client->getResponse()->getContent(), true);
+
         $this->assertArrayHasKey('id', $response);
+        $this->assertArrayHasKey('login', $response);
+        $this->assertArrayHasKey('phone', $response);
+        // Requirement: password hash must be in response
+        $this->assertArrayHasKey('password', $response);
         $this->assertEquals('newuser', $response['login']);
+        $this->assertEquals('11112222', $response['phone']);
     }
 
-    public function testCreateUserValidation()
+    #[DataProvider('provideInvalidPostData')]
+    public function testPostWithInvalidDataReturns422(array $payload, string $expectedErrorField): void
     {
-        // Test validation failure (login too long)
         $this->client->request(
             'POST',
             '/v1/api/users',
             [],
             [],
             ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->rootToken],
-            json_encode(['login' => 'thisloginistoolong', 'phone' => '11112222', 'password' => 'newpass'])
+            json_encode($payload)
         );
 
         $this->assertResponseStatusCodeSame(422);
+        $response = json_decode($this->client->getResponse()->getContent(), true);
+        $this->assertIsArray($response);
+        $this->assertArrayHasKey('detail', $response);
     }
 
-    public function testGetUserAsRoot()
+    public static function provideInvalidPostData(): \Generator
+    {
+        yield 'Login too long' => [['login' => 'thisiswaytoolong', 'phone' => '12345678', 'password' => 'secret'], 'login'];
+        yield 'Phone too long' => [['login' => 'valid', 'phone' => '123456789', 'password' => 'secret'], 'phone'];
+        yield 'Password too long' => [['login' => 'valid', 'phone' => '12345678', 'password' => 'thisiswaytoolong'], 'password'];
+        yield 'Login missing' => [['phone' => '12345678', 'password' => 'secret'], 'login'];
+        yield 'Phone missing' => [['login' => 'valid', 'password' => 'secret'], 'phone'];
+        yield 'Password missing' => [['login' => 'valid', 'phone' => '12345678'], 'password'];
+    }
+
+    public function testGetAsRootReturnsCorrectData(): void
     {
         $this->client->request('GET', '/v1/api/users/' . $this->normalUser->getId(), [], [], ['HTTP_Authorization' => 'Bearer ' . $this->rootToken]);
         $this->assertResponseIsSuccessful();
         $response = json_decode($this->client->getResponse()->getContent(), true);
+
+        $this->assertArrayHasKey('login', $response);
+        $this->assertArrayHasKey('phone', $response);
+        $this->assertArrayHasKey('password', $response); // Requirement: password hash must be in response
         $this->assertEquals($this->normalUser->getLogin(), $response['login']);
     }
 
-    public function testGetUserAsNormalUserOwnProfile()
+    public function testGetAsNormalUserOwnProfileIsSuccessful(): void
     {
         $this->client->request('GET', '/v1/api/users/' . $this->normalUser->getId(), [], [], ['HTTP_Authorization' => 'Bearer ' . $this->normalUserToken]);
         $this->assertResponseIsSuccessful();
     }
 
-    public function testGetUserAsNormalUserOtherProfile()
+    public function testGetAsNormalUserOtherProfileReturns404(): void
     {
-        // Prevents enumeration attack
         $this->client->request('GET', '/v1/api/users/' . $this->rootUser->getId(), [], [], ['HTTP_Authorization' => 'Bearer ' . $this->normalUserToken]);
         $this->assertResponseStatusCodeSame(404);
     }
 
-    public function testGetNonExistentUser()
+    public function testGetNonExistentUserReturns404(): void
     {
         $this->client->request('GET', '/v1/api/users/999999', [], [], ['HTTP_Authorization' => 'Bearer ' . $this->rootToken]);
         $this->assertResponseStatusCodeSame(404);
     }
 
-    public function testUpdateUserAsRoot()
+    public function testPutAsNormalUserOwnProfileIsSuccessful(): void
+    {
+        $this->client->request(
+            'PUT',
+            '/v1/api/users/' . $this->normalUser->getId(),
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->normalUserToken],
+            json_encode(['login' => 'updated', 'phone' => '88887777', 'password' => 'newpass'])
+        );
+        $this->assertResponseIsSuccessful();
+    }
+
+    public function testPutReturnsOnlyId(): void
     {
         $this->client->request(
             'PUT',
@@ -122,14 +153,15 @@ class UserControllerTest extends WebTestCase
             [],
             [],
             ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->rootToken],
-            json_encode(['login' => 'updated', 'phone' => '88887777', 'password' => 'updated'])
+            json_encode(['login' => 'updated', 'phone' => '88887777', 'password' => 'newpass'])
         );
         $this->assertResponseIsSuccessful();
         $response = json_decode($this->client->getResponse()->getContent(), true);
-        $this->assertEquals('updated', $response['login']);
+        $this->assertArrayHasKey('id', $response);
+        $this->assertCount(1, $response, 'Response should only contain the id');
     }
 
-    public function testUpdateUserAsNormalUserOtherProfile()
+    public function testPutAsNormalUserOtherProfileReturns404(): void
     {
         $this->client->request(
             'PUT',
@@ -142,42 +174,54 @@ class UserControllerTest extends WebTestCase
         $this->assertResponseStatusCodeSame(404);
     }
 
-    public function testDeleteUserAsRoot()
+    public function testDeleteAsRootIsSuccessful(): void
     {
         $this->client->request('DELETE', '/v1/api/users/' . $this->normalUser->getId(), [], [], ['HTTP_Authorization' => 'Bearer ' . $this->rootToken]);
         $this->assertResponseStatusCodeSame(204);
     }
 
-    public function testDeleteUserAsNormalUser()
+    public function testDeleteAsNormalUserReturns404(): void
     {
         $this->client->request('DELETE', '/v1/api/users/' . $this->normalUser->getId(), [], [], ['HTTP_Authorization' => 'Bearer ' . $this->normalUserToken]);
-        $this->assertResponseStatusCodeSame(404); // Not found because they don't have permission
+        $this->assertResponseStatusCodeSame(404);
     }
 
-    public function testUnauthenticatedAccess()
+    public function testUnauthenticatedAccessReturns401StandardForBearer(): void
     {
-        $this->client->request('GET', '/v1/api/users/' . $this->normalUser->getId());
+        $this->client->request('GET', '/v1/api/users/' . $this->normalUser->getId(), [], [], ['HTTP_ACCEPT' => 'application/json']);
         $this->assertResponseStatusCodeSame(401);
+    }
 
-        $this->client->request('POST', '/v1/api/users');
-        $this->assertResponseStatusCodeSame(401);
+    public function testGenericExceptionReturnsJson500(): void
+    {
+        // Create a mock of UserFactory that throws a generic exception
+        $mockUserFactory = $this->createStub(UserFactory::class);
+        $mockUserFactory->method('createFromDto')->will($this->throwException(new \Exception('An error appeared!')));
 
-        $this->client->request('PUT', '/v1/api/users/' . $this->normalUser->getId());
-        $this->assertResponseStatusCodeSame(401);
+        // Replace the real service with our mock in the container
+        static::getContainer()->set(UserFactory::class, $mockUserFactory);
 
-        $this->client->request('DELETE', '/v1/api/users/' . $this->normalUser->getId());
-        $this->assertResponseStatusCodeSame(401);
+        $this->client->request(
+            'POST',
+            '/v1/api/users',
+            [],
+            [],
+            ['CONTENT_TYPE' => 'application/json', 'HTTP_Authorization' => 'Bearer ' . $this->rootToken],
+            json_encode(['login' => 'test', 'phone' => '12345678', 'password' => 'test'])
+        );
+
+        $this->assertResponseStatusCodeSame(500);
+        $response = json_decode($this->client->getResponse()->getContent(), true);
+        $this->assertEquals('An unexpected error occurred.', $response['detail']);
+        $this->assertJson($this->client->getResponse()->getContent());
     }
 
     protected function tearDown(): void
     {
         parent::tearDown();
-
-        // Rollback the transaction
         if ($this->entityManager->getConnection()->isTransactionActive()) {
             $this->entityManager->rollback();
         }
-
         $this->entityManager->close();
         $this->entityManager = null;
     }

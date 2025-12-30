@@ -63,7 +63,7 @@ class UserController extends AbstractController
 
         $this->entityManager->flush();
 
-        return $this->json($user, context: ['groups' => 'user:read']);
+        return $this->json(['id' => $user->getId()]);
     }
 
     #[Route('/{id}', name: 'app_user_delete', methods: ['DELETE'])]
