@@ -1,0 +1,59 @@
+
+### Obtain JWT
+POST http://localhost/v1/api/login
+Content-Type: application/json
+
+{
+  "login": "root",
+  "password": "rootpass"
+}
+
+> {%
+client.global.set("token", response.body.token);
+%}
+
+### Create user (POST) — requires Bearer
+POST http://localhost/v1/api/users
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "login": "newuser",
+  "phone": "11112222",
+  "password": "newpass"
+}
+
+### Get user by id (GET) — requires Bearer
+GET http://localhost/v1/api/users/1
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Update user (PUT) — requires Bearer; returns only id
+PUT http://localhost/v1/api/users/1
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "login": "updated",
+  "phone": "88887777",
+  "password": "newpass"
+}
+
+### Delete user (DELETE) — only ROLE_ROOT
+DELETE http://localhost/v1/api/users/1
+Authorization: Bearer {{token}}
+
+### Negative: unauthenticated GET should return 401
+GET http://localhost/v1/api/users/1
+Accept: application/json
+
+### Negative: create user with too long fields (422)
+POST http://localhost/v1/api/users
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "login": "thisiswaytoolong",
+  "phone": "123456789",
+  "password": "thisiswaytoolong"
+}
